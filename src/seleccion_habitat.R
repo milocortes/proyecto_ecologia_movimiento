@@ -1,0 +1,221 @@
+rm(list=ls())
+
+# Load libraries
+library(amt)
+library(tidyverse)
+library (rgdal)
+library(raster)
+
+# Set credential
+loginStored <- movebankLogin(username="", password="")
+
+gallopavo_all <- getMovebankData(study="Eastern Wild Turkey_Margadant", login=loginStored)
+gallopavo_all
+
+# Get track GPS data
+gallopavo <- getMovebankLocationData(study="Eastern Wild Turkey_Margadant" , sensorID="GPS", login=loginStored,removeDuplicatedTimestamps=TRUE)
+# Remove NAN
+
+gallopavo <- gallopavo %>% drop_na()
+
+# Set wd
+setwd("/home/milo/PCIC/Maestría/4toSemestre/ecol_mov/proyecto/data/raster")
+################ Indice de humedad
+wetness <- raster("wetness_gallopavo.tif")
+names(wetness) <- "wetness_"
+################ Elevacion
+elevation <- raster("elv_gallopavo.tif")
+names(elevation) <- "elevation_"
+################# Temperatura
+temperature <- raster("lst_gallopavo.tif")
+names(temperature) <- "temperature_"
+################# EVI
+evi <- raster("evi_gallopavo.tif")
+names(evi) <- "evi_"
+
+# 4. Ahora abrimos los datos de movimiento de una manera un poco diferente a usando tidyverse.
+dat <- gallopavo %>%
+  mutate(x = `location.long`, y = `location.lat`,
+         t = as.POSIXct(gallopavo$timestamp, format= "%Y-%m-%d %H:%M:S", tz="UTC"), id = `individual.local.identifier`)
+
+# 4.1 Exploramos lo datos con un solo indiviudo
+gallo_uno <- subset(dat, individual.local.identifier == "Sky_462")
+
+# 4.2 Creamos el objeto track que puede leer amt
+tr1 <- make_track(gallo_uno, .x = x, .y=y, .t=t,.id =id,crs = 4326)
+tr1 <- transform_coords(tr1,crs_to = 32616)
+
+# Generate random spatial points
+# KDE
+# Usamos un un objeto SpatialPolygons*, el cual puede contener poligonos o mulipoligonos.
+# Esto puede ser bastante util cuando necesitamos adehir un area adicional a las area de actividad para definir de mejor
+# manera lo que podria estar disponible para los animales en las areas que estan utilizando. Al igual que el ejemplo anterior
+# con este metodo tambien se puede utilizar el argumento "presence".
+hr_4 <- hr_kde(tr1, level = 0.95) %>% hr_isopleths() %>%
+  sf::st_buffer(dist =3000) # incluimos un buffer de 3 km
+
+r6 <- random_points(hr_4, n = 45190, presence = tr1)
+
+# 6. Ahora el siguiente paso antes de ajustar el RSF es extraer el valor de las covariables (rasters que est�n arriba)
+# tanto para las localizaciones como para los puntos al azar. Con el comando extract_covariates extraemos el valor de
+# la celda donde est� cada una de las localizaciones.
+rsf1 <- r6 %>%
+      extract_covariates(wetness, where = "end") %>%
+      extract_covariates(elevation, where = "end") %>%
+      extract_covariates(temperature, where = "end") %>%
+      extract_covariates(evi, where = "end")
+rsf1
+# 7.1 Primero ajustamos el modelo m�s complejo y posteriormente vamos simplificando el modelo con base en la
+# logverosimilitud que explique cada una de las covariables
+model_1 <- rsf1 %>% fit_rsf(case_ ~ wetness_ + elevation_)
+summary(model_1)
+AIC(model_1$model)
+
+# *******************************************
+# *******************************************
+## Modelos de selección de recursos
+# *******************************************
+# *******************************************
+
+# 4.1 Creamos el objeto track que puede leer amt. Este caso como vamos a trabajar a nivel poblacional al momento de crear el
+# objeto track vamos indicarle en el argumento "id" que la columna "treatement" es la que da la distinci�n de individuos,
+# pero en este caso todos los elefantes son residentes (not translocated = nt), por lo que el objeto track que crearemos a
+# continuac�n ser� como si fuera un solo individuo. Esto nos permitir� crear un pol�gono m�nimo convexo para todos los
+# individuos y posteriomente estimar los puntos al azar para evaluar la disponibilidad a nivel poblacional.
+gallopavo$treatment <- "nt_gallo"
+dat <- gallopavo %>%
+  mutate(x = `location.long`, y = `location.lat`,
+         t = as.POSIXct(gallopavo$timestamp, format= "%Y-%m-%d %H:%M:S", tz="UTC"), id = `treatment`)
+
+tr1 <- make_track(dat, .x = x, .y=y, .t=t,.id =id,crs = 4326)
+tr1 <- transform_coords(tr1,crs_to = 32616)
+
+# 4.1 El siguiente paso es extraer el 10% de las localizaciones para que podamos validar con el m�todo de validaci�n cruzada
+# Esto lo hacemos con el siguiente c�digo donde tomamos el 10% de las localizaciones al azar y las llamamos "entrenamiento"
+# (training) y al resto localizaciones de prueba (testing).
+training <- tr1 %>%
+  sample_frac(0.1, replace = F)
+
+# Estas localizaciones las utilizaremos posteriomente para la validaci�n. Ahora generamos otro objeto con la localizaciones
+# de prueba con las cuales haremos los modelos
+testing <- anti_join(tr1, training)
+
+######
+# 5. Antes de ajustar un modelo de RSF es necesario preparar los datos. Lo primero que tenemos que hacer es generar datos al
+# azar. En este caso estos puntos representan los sitios donde el animal podria haber usado. Los puntos al azar definen lo
+# disponible para el animal. En este caso utilizaremos  un objeto SpatialPolygons*, el cual puede contener poligonos o mulipoligonos.
+# Esto puede ser bastante util cuando necesitamos adehir un �rea adicional a las �rea de actividad para definir de mejor
+# manera lo que podria estar disponible para los animales en las �reas que est�n utilizando. En este caso al Pol�gono M�nimo
+# Convexo de los datos de los 4 elefantes vamos adherir un �rea adicional de 5 kilom�tros:
+hr_1 <- hr_mcp(testing, level = 1) %>% hr_isopleths() %>%
+  sf::st_buffer(dist =5000) # incluimos un buffer de 5 km
+# Ahora generamos puntos al azar 10 veces m�s de los puntos de las localizaciones:
+r1 <- random_points(hr_1, n = 190210, presence = testing)
+
+# 6. Ahora el siguiente paso antes de ajustar el RSF es extraer el valor de las covariables (rasters que est�n arriba)
+# tanto para las localizaciones como para los puntos al azar. Con el comando extract_covariates extraemos el valor de
+# la celda donde est� cada una de las localizaciones.
+rsf1 <- r1 %>%
+              extract_covariates(wetness, where = "end") %>%
+              extract_covariates(elevation, where = "end") %>%
+              extract_covariates(temperature, where = "end") %>%
+              extract_covariates(evi, where = "end")
+
+# 7. Ya tenemos ahora todas las partes para ajustar el RSF. Para esto vamos a utilizar el comando "fit_rsf" el cual es
+# basicamente una adpataci�n de  stats::glm withfamily = binomial(link = "logit").
+# En este segundo modelo omito forest_ e incluyo las otras covariables que nos estaban en el otro modelo
+model_1 <- rsf1 %>% fit_rsf(case_ ~ wetness_)
+model_2 <- rsf1 %>% fit_rsf(case_ ~ elevation_)
+model_3 <- rsf1 %>% fit_rsf(case_ ~ temperature_)
+model_4 <- rsf1 %>% fit_rsf(case_ ~ evi_)
+model_5 <- rsf1 %>% fit_rsf(case_ ~ wetness_+ elevation_)
+model_6 <- rsf1 %>% fit_rsf(case_ ~ wetness_+ temperature_)
+model_7 <- rsf1 %>% fit_rsf(case_ ~ wetness_+ evi_)
+model_8 <- rsf1 %>% fit_rsf(case_ ~ elevation_+ temperature_)
+model_9 <- rsf1 %>% fit_rsf(case_ ~ elevation_+ evi_)
+model_10 <- rsf1 %>% fit_rsf(case_ ~ temperature_+ evi_)
+model_11 <- rsf1 %>% fit_rsf(case_ ~ wetness_+ elevation_+ temperature_)
+model_12 <- rsf1 %>% fit_rsf(case_ ~ wetness_+ elevation_+ evi_)
+model_13 <- rsf1 %>% fit_rsf(case_ ~ wetness_+ temperature_+ evi_)
+model_14 <- rsf1 %>% fit_rsf(case_ ~ elevation_+ temperature_+ evi_)
+model_15 <- rsf1 %>% fit_rsf(case_ ~ wetness_+ elevation_+ temperature_+ evi_)
+
+library(MuMIn)
+# Ahora promedio los modelos:
+models1<- model.sel (model_1$model,model_2$model,model_3$model,model_4$model,model_5$model,
+                     model_6$model,model_7$model,model_8$model,model_9$model,model_10$model,model_11$model,model_12$model,model_13$model,model_14$model,model_15$model)
+models1
+
+
+# Vemos que el mejor modelo es el modelo 15. Es que tienen menor AIC y explica m�s devianza en comparaci�n
+# con los otros modelos.
+######################################
+# Ahora pasamos al SIG para aplicar nuestro mejor modelo y generar un mapa de
+# idoniedad de h�bitat
+#
+# (Exp(("wetness" * 14.0595996) + ("elevation" * -0.0021378) + ("temperature" * -1.7989168) + ("evi" * 35.2049150) )
+# 2.71828^(("elv_gallopavo@1"*-0.0021378) + ("evi_gallopavo@1"*35.2049150) + ("lst_gallopavo@1"*-1.7989168) + ("wetness_gallopavo@1"*14.0595996))
+
+
+# 9. Ahora utilizando el mejor modelo vamos a graficar el efecto marginal de cada una de las covariables espaciales
+# Para esto necesitamos las siguientes librerias. Si no las tienen instaladas hay que hacerlo
+# install.packages("ggeffects")
+# install.packages("ggplot2")
+library(ggeffects)
+library(ggplot2)
+
+model_15 <- rsf1 %>% fit_rsf(as.factor(case_) ~ wetness_+ elevation_+ temperature_+ evi_, model =TRUE)
+
+# 9.2 Ahora gr�ficamos el efecto marginal de cada una de las covariables
+g1 <- ggpredict(model_15$model, terms = "wetness_[all]")
+#
+g1_p <- ggplot(g1, aes(x, predicted)) +
+  geom_line (colour="tomato4", size = 1, linetype= "longdash") +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .2, linetype = "dotted", fill = "tomato1") +
+  theme_classic() +
+  ggtitle("Tasseled Cap Wetness (TCW)") +
+  theme(plot.title = element_text(size = 16, face = "bold"), axis.text = element_text( size=15), axis.text.x = element_text(size=15),
+        axis.text.y = element_text(size=15), axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+ggsave(g1_p, file="m_effects_wetness.eps", device=cairo_ps)
+
+###
+g2 <- ggpredict(model_15$model, terms = "elevation_[all]")
+#
+g2_p <- ggplot(g2, aes(x, predicted)) +
+  geom_line (colour="tomato4", size = 1, linetype= "longdash") +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .2, linetype = "dotted", fill = "tomato1") +
+  theme_classic() +
+  ggtitle("USGS ground elevation (ELV)") +
+  theme(plot.title = element_text(size = 16, face = "bold"), axis.text = element_text( size=15), axis.text.x = element_text(size=15),
+        axis.text.y = element_text(size=15), axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+ggsave(g2_p, file="m_effects_elevation.eps", device=cairo_ps)
+
+###
+g3 <- ggpredict(model_15$model, terms = "temperature_[all]")
+#
+g3_p <- ggplot(g3, aes(x, predicted)) +
+  geom_line (colour="tomato4", size = 1, linetype= "longdash") +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .2, linetype = "dotted", fill = "tomato1") +
+  theme_classic() +
+  ggtitle("MODIS land surface temperature (LST)") +
+  theme(plot.title = element_text(size = 16, face = "bold"), axis.text = element_text( size=15), axis.text.x = element_text(size=15),
+        axis.text.y = element_text(size=15), axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+ggsave(g3_p, file="m_effects_temperature.eps", device=cairo_ps)
+
+###
+g4 <- ggpredict(model_15$model, terms = "evi_[all]")
+#
+g4_p <- ggplot(g4, aes(x, predicted)) +
+  geom_line (colour="tomato4", size = 1, linetype= "longdash") +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .2, linetype = "dotted", fill = "tomato1") +
+  theme_classic() +
+  ggtitle("Enhanced Vegetation Index (EVI) ") +
+  theme(plot.title = element_text(size = 16, face = "bold"), axis.text = element_text( size=15), axis.text.x = element_text(size=15),
+        axis.text.y = element_text(size=15), axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+ggsave(g4_p, file="m_effects_evi.eps", device=cairo_ps)
