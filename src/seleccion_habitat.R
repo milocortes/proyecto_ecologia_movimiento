@@ -146,6 +146,79 @@ models1<- model.sel (model_1$model,model_2$model,model_3$model,model_4$model,mod
                      model_6$model,model_7$model,model_8$model,model_9$model,model_10$model,model_11$model,model_12$model,model_13$model,model_14$model,model_15$model)
 models1
 
+# Mapa de idoniedad de hábitat
+RSF_raster <- exp(29.210273+(wetness*14.239908) + (elevation*-0.002116) + (temperature*-1.798726) + (evi*35.179920)) / (1 + exp(29.210273+(wetness*14.239908) + (elevation*-0.002116) + (temperature*-1.798726) + (evi*35.179920)))
+
+setwd("/home/milo/PCIC/Maestría/4toSemestre/ecol_mov/proyecto/output/idoneidad/plots")
+cairo_ps(file = "idoneidad_habitat.eps",onefile = FALSE,fallback_resolution=600)
+plot(RSF_raster)
+title("Mapa de idoneidad de hábitat")
+dev.off()
+
+setwd("/home/milo/PCIC/Maestría/4toSemestre/ecol_mov/proyecto/output/idoneidad/raster")
+
+print("Guardamos el raster de idoneidad de habitat")
+
+writeRaster(RSF_raster, filename="idoneidad_habitat.tif", overwrite=TRUE)
+
+# Reclasificamos en 10 bins
+RSF_bins <- reclassify(RSF_raster, c(0.0,0.10,1,
+                                0.1,0.2,2,
+                                0.2,0.3,3,
+                                0.3,0.4,4,
+                                0.4,0.5,6,
+                                0.5,0.6,6,
+                                0.6,0.7,7,
+                                0.7,0.8,8,
+                                0.8,0.9,9,
+                                0.9,1.0,10))
+
+# Retomamos primero el objeto con los datos de entrenamiento
+validacion <- training
+# Extraemos los valores de los bins para cada punto de los datos de entrenamiento
+validacion <- validacion %>%
+  extract_covariates(RSF_bins, where = "end")
+validacion
+summary(validacion)
+
+# Ahora convertimoslos valores obtenidos a factor y los convertimos en una tabla.
+val_3<-data.frame(validacion)
+###
+val_3$val_1 <- as.factor(val_3$layer)
+table(val_3$val_1)
+
+
+# 8.2 Ahora aplicamos la validaci�n de grupos  k-fold siguiendo el m�todo de Jonhson et al. (2006). Para estimar los
+# esperados se utiliza la siguiente formula:
+# Ni = N x U(Xi)
+# N numero total de observaciones en los datos de validaci�n t
+# U(Xi) es la funci�n de utilizaci�n estimada en el excel que les mostr�.
+# Los observados son los datos obtenidos con los puntos de entrenamiento y los valores de los bins
+
+n_cell_each_bin <-vector()
+
+for (i in c(1:10)) {
+  n_cell_each_bin[i] <- cellStats(RSF_bins==i, 'sum')
+}
+
+expected <- c (37,	78,	95,	109,	157,	188,	261,	345,	473,	371)
+observed <-  c (60,  96,  81,  75,  98,  96, 113, 202, 457, 835)
+###
+expected100 <- (expected/2113)
+expected100
+#
+observed100 <- (observed/2113)
+observed100
+####
+val <- cbind (expected100, observed100)
+plot (expected100, observed100)
+
+# 8.3 Finalmente aplicamos la correlaci�n de Spearman.
+val <- data.frame(val)
+names(val)
+corrmats <- cor(val,method="spearman")
+corrmats
+
 
 # Vemos que el mejor modelo es el modelo 15. Es que tienen menor AIC y explica m�s devianza en comparaci�n
 # con los otros modelos.
